@@ -21,8 +21,6 @@ jobs:
     - name: Run translations # Dummy placeholder for updating translations
       if: ${{ inputs.run-translations }}
       run: echo "running translations"
-    - name: Try to fail
-      run: exit 1
 
     - name: Pack # Dummy placeholder for packing libraries
       if: ${{ inputs.pack }}
