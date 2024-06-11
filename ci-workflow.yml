@@ -1,0 +1,31 @@
+name: Reusable CI Workflow
+
+on:
+  workflow_call:
+    inputs:
+      run-translations:
+        required: true
+        type: boolean
+      pack:
+        required: true
+        type: boolean
+
+jobs:
+  reusable-workflow:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Run translations # Dummy placeholder for updating translations
+      if: ${{ inputs.run-translations }}
+      run: echo "running translations"
+
+    - name: Pack # Dummy placeholder for packing libraries
+      if: ${{ inputs.pack }}
+      run: echo "packing library"
+
+    # Comment out if want to test with the reusable workflow failing.
+    # - name: Try to fail
+    #   run: exit 1
