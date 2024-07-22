@@ -12,11 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ inputs.run-translations }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 1
-
       - name: Setup node
         uses: actions/setup-node@v3
         with:
