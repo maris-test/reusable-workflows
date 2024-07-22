@@ -6,26 +6,32 @@ on:
       run-translations:
         required: true
         type: boolean
-      pack:
-        required: true
-        type: boolean
 
 jobs:
-  reusable-workflow:
+  validate-translations:
     runs-on: ubuntu-latest
-
+    if: ${{ inputs.run-translations }}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: Run translations # Dummy placeholder for updating translations
-      if: ${{ inputs.run-translations }}
-      run: echo "running translations"
+      - name: Setup node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
 
-    - name: Pack # Dummy placeholder for packing libraries
-      if: ${{ inputs.pack }}
-      run: echo "packing library"
+      - name: Clone h5p-cli repository
+        run: git clone --branch JI-6502-lang-compare-semantics https://github.com/h5p/h5p-cli.git
 
-    # Comment out if want to test with the reusable workflow failing.
-    # - name: Try to fail
-    #   run: exit 1
+      - name: Install h5p-cli from specific branch
+        run: |
+          cd h5p-cli
+          npm install
+          cd ..
+          npm install -g ./h5p-cli
+
+      - name: Validate translations
+        run: |
+          libDir=${PWD##*/}
+          cd ..
+          h5p utils validate "${libDir}"
