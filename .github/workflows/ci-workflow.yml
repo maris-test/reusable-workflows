@@ -6,32 +6,177 @@ on:
       run-translations:
         required: true
         type: boolean
+      # run-e2e:
+      #   description: "Run the content type E2E suite against the PR branch"
+      #   required: false
+      #   default: false
+      #   type: boolean
+      run-build:
+        description: "Run the npm build command"
+        required: false
+        default: false
+        type: boolean
+      build-command:
+        description: "Build command for the caller repository"
+        required: false
+        default: npm run build
+        type: string
+      run-tests:
+        description: "Run the npm test command"
+        required: false
+        default: false
+        type: boolean
+      test-command:
+        description: "Test command for the caller repository"
+        required: false
+        default: npm test
+        type: string
+      # e2e-ref:
+      #   description: "Ref of h5pcom-e2e-tests to run the suite from"
+      #   required: false
+      #   default: main
+      #   type: string
+      h5p-cli-ref:
+        description: "h5p-cli ref for h5p utils use"
+        required: false
+        default: b33e87fd7d8a72eb641e008d8e9312042f947b02
+        type: string
+    #   ct-e2e-image:
+    #     description: "GHCR image for content-type-e2e. Bump after publishing a new image; do not use :latest"
+    #     required: false
+    #     default: ghcr.io/h5p/ct-e2e:playwright-1.57.0-cli-b33e87fd
+    #     type: string
+    # secrets:
+    #   E2E_ID:
+    #     description: "GitHub App ID used to check out private h5pcom-e2e-tests (only when run-e2e is true)"
+    #     required: false
+    #   E2E_PRIVATE_KEY:
+    #     description: "GitHub App private key for that checkout (only when run-e2e is true)"
+    #     required: false
 
 jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run-build }}
+    steps:
+      - name: Check out pull request code
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run build
+        run: ${{ inputs.build-command }}
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run-tests }}
+    steps:
+      - name: Check out pull request code
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: ${{ inputs.test-command }}
+
   validate-translations:
     runs-on: ubuntu-latest
     if: ${{ inputs.run-translations }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout main repository
+        uses: actions/checkout@v6
 
       - name: Setup node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
 
-      - name: Clone h5p-cli repository
-        run: git clone --branch JI-6502-lang-compare-semantics https://github.com/h5p/h5p-cli.git
+      - name: Checkout h5p-cli
+        uses: actions/checkout@v6
+        with:
+          repository: h5p/h5p-cli
+          ref: ${{ inputs.h5p-cli-ref }}
+          path: h5p-cli
+          fetch-depth: 1
 
-      - name: Install h5p-cli from specific branch
+      - name: Install h5p-cli
         run: |
           cd h5p-cli
-          npm install
+          npm ci --ignore-scripts
           cd ..
-          npm install -g ./h5p-cli
+          npm install -g ./h5p-cli --ignore-scripts
 
       - name: Validate translations
         run: |
           libDir=${PWD##*/}
           cd ..
           h5p utils validate "${libDir}"
+
+  # content-type-e2e:
+  #   runs-on: ubuntu-latest
+  #   if: ${{ inputs.run-e2e }}
+  #   timeout-minutes: 30
+  #   container:
+  #     image: ${{ inputs.ct-e2e-image }}
+  #     credentials:
+  #       username: ${{ github.actor }}
+  #       password: ${{ secrets.GITHUB_TOKEN }}
+  #   steps:
+  #     - name: Token for private e2e repo
+  #       id: e2e-token
+  #       uses: actions/create-github-app-token@v1
+  #       with:
+  #         app-id: ${{ secrets.E2E_ID }}
+  #         private-key: ${{ secrets.E2E_PRIVATE_KEY }}
+  #         owner: h5p
+  #         repositories: h5pcom-e2e-tests
+
+  #     - name: Checkout e2e tests
+  #       uses: actions/checkout@v6
+  #       with:
+  #         repository: h5p/h5pcom-e2e-tests
+  #         ref: ${{ inputs.e2e-ref }}
+  #         token: ${{ steps.e2e-token.outputs.token }}
+  #         path: e2e
+  #         fetch-depth: 1
+
+  #     - name: Install e2e dependencies
+  #       working-directory: e2e
+  #       run: npm ci --ignore-scripts
+
+  #     - name: Restore baked h5p core
+  #       run: |
+  #         mkdir -p e2e/.h5p-cli-runner
+  #         cp -a /opt/h5p-runner/. e2e/.h5p-cli-runner/
+
+  #     - name: Run content type E2E tests
+  #       working-directory: e2e
+  #       env:
+  #         CI: "true"
+  #         CT_BRANCH: ${{ github.head_ref || github.ref_name }}
+  #       run: npm run test:cli -- "${{ github.event.repository.name }}" --branch="$CT_BRANCH"
+
+  #     - name: Upload Playwright report
+  #       if: failure()
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: playwright-report-${{ github.event.repository.name }}
+  #         path: e2e/playwright-report
+  #         retention-days: 7
+  #         if-no-files-found: ignore

@@ -1,0 +1,76 @@
+name: PR policy
+
+on:
+  workflow_call:
+    inputs:
+      policy-ref:
+        description: "Full commit SHA for the shared policy repository"
+        required: true
+        type: string
+      policy-repository:
+        description: "Repository that contains the shared policy code"
+        required: false
+        default: maris-test/reusable-workflows
+        type: string
+      required-checks:
+        description: "JSON array of required check names"
+        required: true
+        type: string
+      translation-paths:
+        description: "JSON array of translation path patterns"
+        required: false
+        default: '["language/*.json"]'
+        type: string
+      fallback-owner:
+        description: "Owner for paths without a CODEOWNERS match"
+        required: false
+        default: makmentins
+        type: string
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+jobs:
+  report:
+    name: policy-report
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the immutable policy reference
+        shell: bash
+        env:
+          POLICY_REF: ${{ inputs.policy-ref }}
+        run: |
+          if [[ ! "$POLICY_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "policy-ref must be a full commit SHA."
+            exit 1
+          fi
+
+      - name: Check out trusted policy code
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.policy-repository }}
+          ref: ${{ inputs.policy-ref }}
+          path: .h5p-policy
+          persist-credentials: false
+
+      - name: Read Dependabot metadata
+        id: dependabot
+        if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+        continue-on-error: true
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ github.token }}
+
+      - name: Report the policy decision
+        uses: actions/github-script@v9
+        env:
+          DEPENDABOT_DEPENDENCIES: ${{ steps.dependabot.outputs.dependency-names }}
+          DEPENDABOT_METADATA_OUTCOME: ${{ steps.dependabot.outcome }}
+          DEPENDABOT_NEW_VERSION: ${{ steps.dependabot.outputs.new-version }}
+          DEPENDABOT_PREVIOUS_VERSION: ${{ steps.dependabot.outputs.previous-version }}
+          DEPENDABOT_UPDATE_TYPE: ${{ steps.dependabot.outputs.update-type }}
+          POLICY_FALLBACK_OWNER: ${{ inputs.fallback-owner }}
+          POLICY_REQUIRED_CHECKS: ${{ inputs.required-checks }}
+          POLICY_TRANSLATION_PATHS: ${{ inputs.translation-paths }}
