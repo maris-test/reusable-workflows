@@ -26,15 +26,25 @@ on:
         required: false
         default: makmentins
         type: string
+      merge-method:
+        description: "Platform auto-merge method"
+        required: false
+        default: merge
+        type: string
+      policy-check-name:
+        description: "Required check name for conditional approval"
+        required: false
+        default: H5P policy approval
+        type: string
 
 permissions:
-  contents: read
-  checks: read
-  pull-requests: read
+  contents: write
+  checks: write
+  pull-requests: write
 
 jobs:
-  report:
-    name: policy-report
+  enforce:
+    name: policy-enforcement
     runs-on: ubuntu-latest
     steps:
       - name: Verify the immutable policy reference
@@ -63,7 +73,7 @@ jobs:
         with:
           github-token: ${{ github.token }}
 
-      - name: Report the policy decision
+      - name: Enforce the policy decision
         uses: actions/github-script@v9
         env:
           DEPENDABOT_DEPENDENCIES: ${{ steps.dependabot.outputs.dependency-names }}
@@ -72,5 +82,24 @@ jobs:
           DEPENDABOT_PREVIOUS_VERSION: ${{ steps.dependabot.outputs.previous-version }}
           DEPENDABOT_UPDATE_TYPE: ${{ steps.dependabot.outputs.update-type }}
           POLICY_FALLBACK_OWNER: ${{ inputs.fallback-owner }}
+          POLICY_CHECK_NAME: ${{ inputs.policy-check-name }}
+          POLICY_MERGE_METHOD: ${{ inputs.merge-method }}
           POLICY_REQUIRED_CHECKS: ${{ inputs.required-checks }}
           POLICY_TRANSLATION_PATHS: ${{ inputs.translation-paths }}
+        with:
+          script: |
+            const path = require('path');
+            const policy = require(path.join(process.env.GITHUB_WORKSPACE, '.h5p-policy', 'src', 'enforce-policy.cjs'));
+            await policy.run({
+              github,
+              context,
+              core,
+              config: {
+                dependabotMetadataOutcome: process.env.DEPENDABOT_METADATA_OUTCOME,
+                fallbackOwner: process.env.POLICY_FALLBACK_OWNER,
+                mergeMethod: process.env.POLICY_MERGE_METHOD,
+                policyCheckName: process.env.POLICY_CHECK_NAME,
+                requiredChecks: JSON.parse(process.env.POLICY_REQUIRED_CHECKS),
+                translationPatterns: JSON.parse(process.env.POLICY_TRANSLATION_PATHS)
+              }
+            });
