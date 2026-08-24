@@ -80,6 +80,21 @@ function validDependabotMetadata(metadata) {
   );
 }
 
+/**
+ * Classifies a pull request into one of the managed categories.
+ * Categories:
+ * - MANUAL: Requires manual review.
+ * - DEPENDENCY_PATCH: Dependabot supplied a verified stable patch at or above 1.0.0.
+ * - DEPENDENCY_REVIEW: The dependency update is not an eligible stable patch.
+ * - TRANSLATION: Only configured translation files changed.
+ * @param {Object} input - The pull request data.
+ * @param {string} input.author - The author of the pull request.
+ * @param {string[]} input.changedFiles - The list of changed file paths.
+ * @param {string[]} input.translationPatterns - The list of translation file patterns.
+ * @param {boolean} input.dependabotCommitsTrusted - Whether all Dependabot commits are trusted.
+ * @param {Object} input.dependabotMetadata - The Dependabot metadata object.
+ * @returns {Object} An object containing the category and reason for classification.
+ */
 function classifyPullRequest(input) {
   const changedFiles = input.changedFiles || [];
   const translationPatterns = input.translationPatterns || [];

@@ -11,7 +11,7 @@ const COMMENT_MARKER = '<!-- h5p-managed-policy -->';
 const DEFAULT_CHECK_NAME = 'H5P policy approval';
 
 async function readCodeowners(github, owner, repo, ref) {
-  const path = 'CODEOWNERS';
+  const path = '.github/CODEOWNERS';
   try {
     const response = await github.rest.repos.getContent({ owner, repo, path, ref });
     if (!Array.isArray(response.data) && response.data.content) {
@@ -389,10 +389,10 @@ async function run({ github, context, core, config, environment = process.env })
     message = `${owners.join(', ')} approval requested.`;
   }
   else if (!autoMergeAllowed) {
-    message = `${owners.join(', ')}, automation will keep this pull request open because Dependabot no longer owns every verified commit.`;
+    message = `Automation will keep this pull request open because Dependabot no longer owns every verified commit.`;
   }
   else {
-    message = `${owners.join(', ')}, the approval policy passed. Platform auto-merge can wait for the required validation checks.`;
+    message = `The approval policy passed. Platform auto-merge can wait for the required validation checks.`;
   }
   await upsertManagedComment(github, location, comments, managedCommentBody(message));
 
