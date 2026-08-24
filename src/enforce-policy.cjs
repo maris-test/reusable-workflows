@@ -124,20 +124,9 @@ async function hasApplicableOwnerApproval(github, reviews, owners, headSha) {
   return false;
 }
 
-function managedCommentBody(input) {
+function managedCommentBody(message) {
   return `${COMMENT_MARKER}
-## H5P pull request policy
-
-| Field | Value |
-| --- | --- |
-| Category | ${input.category} |
-| Required checks | ${input.requiredChecks.join(', ') || 'None configured'} |
-| CODEOWNER approval | ${input.approvalRequired ? 'Required' : 'Not required'} |
-| Resolved CODEOWNER | ${input.owners.join(', ')} |
-| Decision | ${input.decision} |
-| Evaluated head SHA | \`${input.headSha}\` |
-
-${input.message}`;
+${message}`;
 }
 
 async function upsertManagedComment(github, location, comments, body) {
@@ -318,7 +307,7 @@ async function run({ github, context, core, config, environment = process.env })
 
   let message;
   if (!approvalSatisfied) {
-    message = `${owners.join(', ')}, approve the current head SHA before auto-merge can start.`;
+    message = `${owners.join(', ')} approval requested.`;
   }
   else if (!autoMergeAllowed) {
     message = `${owners.join(', ')}, automation will keep this pull request open because Dependabot no longer owns every verified commit.`;
@@ -326,15 +315,7 @@ async function run({ github, context, core, config, environment = process.env })
   else {
     message = `${owners.join(', ')}, the approval policy passed. Platform auto-merge can wait for the required validation checks.`;
   }
-  await upsertManagedComment(github, location, comments, managedCommentBody({
-    category: classification.category,
-    requiredChecks: config.requiredChecks,
-    approvalRequired: result.approvalRequired,
-    owners,
-    decision: result.decision,
-    headSha: initialHeadSha,
-    message
-  }));
+  await upsertManagedComment(github, location, comments, managedCommentBody(message));
 
   if (currentPull.auto_merge && (!approvalSatisfied || !autoMergeAllowed)) {
     await disableAutoMerge(github, currentPull.node_id);
