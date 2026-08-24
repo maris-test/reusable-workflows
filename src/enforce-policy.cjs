@@ -11,17 +11,16 @@ const COMMENT_MARKER = '<!-- h5p-managed-policy -->';
 const DEFAULT_CHECK_NAME = 'H5P policy approval';
 
 async function readCodeowners(github, owner, repo, ref) {
-  for (const path of ['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS']) {
-    try {
-      const response = await github.rest.repos.getContent({ owner, repo, path, ref });
-      if (!Array.isArray(response.data) && response.data.content) {
-        return Buffer.from(response.data.content, response.data.encoding || 'base64').toString('utf8');
-      }
+  const path = 'CODEOWNERS';
+  try {
+    const response = await github.rest.repos.getContent({ owner, repo, path, ref });
+    if (!Array.isArray(response.data) && response.data.content) {
+      return Buffer.from(response.data.content, response.data.encoding || 'base64').toString('utf8');
     }
-    catch (error) {
-      if (error.status !== 404) {
-        throw error;
-      }
+  }
+  catch (error) {
+    if (error.status !== 404) {
+      throw error;
     }
   }
   return '';
@@ -43,6 +42,11 @@ function dependabotMetadata(environment, outcome) {
   };
 }
 
+/**
+ * Returns true if all commits are authored by dependabot[bot] and verified.
+ * @param {Array} commits - The list of commits to evaluate.
+ * @returns {boolean} - True if all commits are trusted, false otherwise.
+ */
 function commitsAreTrusted(commits) {
   return commits.length > 0 && commits.every((commit) => {
     const author = commit.author && commit.author.login;
@@ -51,6 +55,12 @@ function commitsAreTrusted(commits) {
   });
 }
 
+/**
+ * Returns a map of the latest review states for each user, filtered by the specified head SHA.
+ * @param {Array} reviews - The list of reviews to evaluate.
+ * @param {string} headSha - The head SHA to filter reviews by.
+ * @returns {Map} - A map of user logins to their latest review state.
+ */
 function latestReviewStates(reviews, headSha) {
   const states = new Map();
   for (const review of reviews) {
@@ -63,6 +73,11 @@ function latestReviewStates(reviews, headSha) {
   return states;
 }
 
+/**
+ * Splits a CODEOWNER string into its type and identifier.
+ * @param {string} owner - The CODEOWNER string to split.
+ * @returns {Object} - An object containing the type and identifier of the owner.
+ */
 function splitOwner(owner) {
   const value = String(owner).replace(/^@/, '');
   const separator = value.indexOf('/');
@@ -76,6 +91,12 @@ function splitOwner(owner) {
   };
 }
 
+/**
+ * Resolves the review targets (users and teams) from a list of CODEOWNER strings.
+ * @param {Array} owners - The list of CODEOWNER strings to resolve.
+ * @param {string} repositoryOwner - The owner of the repository to filter teams by.
+ * @returns {Object} - An object containing arrays of user logins and team slugs.
+ */
 function reviewTargets(owners, repositoryOwner) {
   const users = new Set();
   const teams = new Set();
@@ -91,6 +112,14 @@ function reviewTargets(owners, repositoryOwner) {
   return { users: [...users], teams: [...teams] };
 }
 
+/**
+ * Checks if there is an applicable owner approval for the given head SHA.
+ * @param {Object} github - The GitHub API client.
+ * @param {Array} reviews - The list of reviews to evaluate.
+ * @param {Array} owners - The list of CODEOWNER strings to check against.
+ * @param {string} headSha - The head SHA to filter reviews by.
+ * @returns {boolean} - True if there is an applicable owner approval, false otherwise.
+ */
 async function hasApplicableOwnerApproval(github, reviews, owners, headSha) {
   const approvedUsers = [...latestReviewStates(reviews, headSha).entries()]
     .filter(([, state]) => state === 'APPROVED')
@@ -157,6 +186,14 @@ function latestPolicyCheck(checkRuns, name) {
     .sort((left, right) => new Date(right.started_at || 0) - new Date(left.started_at || 0))[0];
 }
 
+/**
+ * Upserts a policy check run for the given pull request.
+ * @param {Object} github - The GitHub API client.
+ * @param {Object} location - The location of the pull request (owner, repo, pullNumber, pullUrl, headSha).
+ * @param {Array} checkRuns - The list of existing check runs for the pull request.
+ * @param {Object} input - The input data for the policy check (name, approved, title, summary).
+ * @returns {Promise<number>} - The ID of the upserted check run.
+ */
 async function upsertPolicyCheck(github, location, checkRuns, input) {
   const existing = latestPolicyCheck(checkRuns, input.name);
   const desiredStatus = input.approved ? 'completed' : 'in_progress';
@@ -195,6 +232,13 @@ async function upsertPolicyCheck(github, location, checkRuns, input) {
   return response.data.id;
 }
 
+/**
+ * Requests missing reviews from the specified owners for the given pull request.
+ * @param {Object} github - The GitHub API client.
+ * @param {Object} location - The location of the pull request (owner, repo, pullNumber).
+ * @param {Object} currentPull - The current pull request data.
+ * @param {Array} owners - The list of CODEOWNER strings to request reviews from.
+ */
 async function requestMissingReviews(github, location, currentPull, owners) {
   const targets = reviewTargets(owners, location.owner);
   const currentUsers = new Set((currentPull.requested_reviewers || []).map((user) => user.login));
@@ -221,14 +265,39 @@ function mergeMethod(value) {
   return normalized;
 }
 
-async function enableAutoMerge(github, pullRequestId, method) {
-  await github.graphql(`
-    mutation EnableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
-      enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: $mergeMethod }) {
-        pullRequest { id }
+function isUnstableMergeStateError(error) {
+  const messages = Array.isArray(error && error.errors) ? error.errors.map((item) => item.message) : [];
+  return messages.some((message) => String(message).toLowerCase().includes('unstable status'));
+}
+
+/**
+ * Enables auto-merge for the given pull request.
+ * GraphQL API is used because the REST API does not support enabling auto-merge.
+ * 
+ * @param {Object} github - The GitHub API client.
+ * @param {Object} core - The GitHub Actions core module.
+ * @param {string} pullRequestId - The ID of the pull request.
+ * @param {string} method - The merge method to use (merge, squash, rebase).
+ */
+async function enableAutoMerge(github, core, pullRequestId, method) {
+  try {
+    await github.graphql(`
+      mutation EnableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+        enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: $mergeMethod }) {
+          pullRequest { id }
+        }
       }
+    `, { pullRequestId, mergeMethod: mergeMethod(method) });
+  }
+  catch (error) {
+    // GitHub reports "unstable status" while it is still recomputing the merge state after a
+    // concurrent policy run (pull_request_target and pull_request_review can fire together).
+    // Auto-merge is retried on the next policy run, so this is safe to ignore.
+    if (!isUnstableMergeStateError(error)) {
+      throw error;
     }
-  `, { pullRequestId, mergeMethod: mergeMethod(method) });
+    core.notice('Auto-merge could not be enabled yet because the pull request merge state is still unstable; it will be retried on the next policy run.');
+  }
 }
 
 async function disableAutoMerge(github, pullRequestId) {
@@ -241,6 +310,16 @@ async function disableAutoMerge(github, pullRequestId) {
   `, { pullRequestId });
 }
 
+/**
+ * Runs the pull request policy enforcement logic.
+ * @param {Object} params - The parameters for the run function.
+ * @param {Object} params.github - The GitHub API client.
+ * @param {Object} params.context - The GitHub Actions context.
+ * @param {Object} params.core - The GitHub Actions core module.
+ * @param {Object} params.config - The configuration for the policy enforcement.
+ * @param {Object} [params.environment=process.env] - The environment variables (default: process.env).
+ * @returns {Promise<Object>} - The result of the policy enforcement, including classification, owners, checkState, approvalSatisfied, and decision.
+ */
 async function run({ github, context, core, config, environment = process.env }) {
   const pullNumber = context.payload.pull_request.number;
   const { owner, repo } = context.repo;
@@ -321,7 +400,7 @@ async function run({ github, context, core, config, environment = process.env })
     await disableAutoMerge(github, currentPull.node_id);
   }
   else if (!currentPull.auto_merge && approvalSatisfied && autoMergeAllowed) {
-    await enableAutoMerge(github, currentPull.node_id, config.mergeMethod);
+    await enableAutoMerge(github, core, currentPull.node_id, config.mergeMethod);
   }
 
   await core.summary
@@ -348,6 +427,7 @@ module.exports = {
   commitsAreTrusted,
   dependabotMetadata,
   hasApplicableOwnerApproval,
+  isUnstableMergeStateError,
   managedCommentBody,
   mergeMethod,
   requestMissingReviews,
