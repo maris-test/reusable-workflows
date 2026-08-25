@@ -1,6 +1,7 @@
 'use strict';
 
 const {
+  CATEGORY,
   classifyPullRequest,
   evaluatePolicy,
   requiredCheckState,
@@ -254,8 +255,14 @@ async function upsertPolicyCheck(github, location, checkRuns, input) {
   return response.data.id;
 }
 
-function policyCheckConclusion(result, ownerApproved) {
-  if (result.decision === 'would-enable-auto-merge') {
+function policyCheckConclusion(result, ownerApproved, removedFiles) {
+  if (
+    !removedFiles &&
+    (
+      result.decision === 'would-enable-auto-merge' ||
+      (result.decision === 'keep-open-after-owner-review' && ownerApproved)
+    )
+  ) {
     return 'success';
   }
 
@@ -274,6 +281,13 @@ function policyCheckOutput(result, classification, owners, removedFiles) {
     };
   }
 
+  if (result.decision === 'keep-open-after-owner-review' && !removedFiles) {
+    return {
+      title: 'Approval recorded; manual merge required',
+      summary: `${classification.category}: ${classification.reason} ${ownerSummary}`
+    };
+  }
+
   if (removedFiles) {
     return {
       title: 'File removal requires manual review',
@@ -285,6 +299,27 @@ function policyCheckOutput(result, classification, owners, removedFiles) {
     title: 'Manual review required',
     summary: `${classification.category}: ${classification.reason} ${ownerSummary}`
   };
+}
+
+function policyMessage(result, owners, removedFiles) {
+  switch (result.decision) {
+    case 'request-owner-review':
+      return `${owners.join(', ')} approval requested.`;
+    case 'keep-open-and-notify-owner':
+      return removedFiles
+        ? 'H5P Automation will keep this pull request open because it removes files.'
+        : 'H5P Automation will keep this pull request open because a policy condition is not satisfied.';
+    case 'keep-open-after-owner-review':
+      return removedFiles
+        ? 'H5P Automation will keep this pull request open because it removes files.'
+        : 'Approval recorded. H5P Automation will keep this pull request open for manual merge.';
+    case 'would-enable-auto-merge':
+      return 'Pull request is eligible for auto merge if all required validation checks pass.';
+    case 'stop-for-changed-head':
+      return 'H5P Automation will stop because the pull request changed during policy evaluation.';
+    default:
+      return 'H5P Automation will keep this pull request open until the policy can be evaluated.';
+  }
 }
 
 /**
@@ -421,7 +456,11 @@ async function run({ github, context, core, config, environment = process.env })
   const ownerApproved = await hasApplicableOwnerApproval(github, reviews, owners, initialHeadSha);
   const checkRuns = checks.flatMap((page) => page.check_runs || page);
   const checkState = requiredCheckState(config.requiredChecks, checkRuns);
-  const autoMergeAllowed = !removedFiles && (currentPull.user.login !== 'dependabot[bot]' || (metadata.valid && trustedCommits));
+  const autoMergeCategory = [CATEGORY.DEPENDENCY_PATCH, CATEGORY.TRANSLATION]
+    .includes(classification.category);
+  const autoMergeAllowed = !removedFiles && autoMergeCategory && (
+    currentPull.user.login !== 'dependabot[bot]' || (metadata.valid && trustedCommits)
+  );
   const result = evaluatePolicy({
     category: classification.category,
     autoMergeAllowed,
@@ -431,7 +470,6 @@ async function run({ github, context, core, config, environment = process.env })
     headSha: currentPull.head.sha,
     evaluatedHeadSha: initialHeadSha
   });
-  const approvalSatisfied = !result.approvalRequired || ownerApproved;
   const policyCheck = policyCheckOutput(result, classification, owners, removedFiles);
   const location = {
     owner,
@@ -443,7 +481,7 @@ async function run({ github, context, core, config, environment = process.env })
 
   await upsertPolicyCheck(github, location, checkRuns, {
     name: config.policyCheckName || DEFAULT_CHECK_NAME,
-    conclusion: policyCheckConclusion(result, ownerApproved),
+    conclusion: policyCheckConclusion(result, ownerApproved, removedFiles),
     ...policyCheck
   });
 
@@ -451,22 +489,13 @@ async function run({ github, context, core, config, environment = process.env })
     await requestMissingReviews(github, location, currentPull, owners);
   }
 
-  let message;
-
-  if (!approvalSatisfied) {
-    message = `${owners.join(', ')} approval requested.`;
-  }
-  else if (removedFiles) {
-    message = 'H5P Automation will keep this pull request open because it removes files.';
-  }
-  else if (!autoMergeAllowed) {
-    message = `H5P Automation will keep this pull request open because Dependabot no longer owns every verified commit.`;
-  }
-  else {
-    message = `Pull request is eligible for auto merge if all required validation checks pass.`;
-  }
-
-  await upsertManagedComment(github, location, comments, managedCommentBody(message));
+  const approvalSatisfied = !result.approvalRequired || ownerApproved;
+  await upsertManagedComment(
+    github,
+    location,
+    comments,
+    managedCommentBody(policyMessage(result, owners, removedFiles))
+  );
 
   if (currentPull.auto_merge && (!approvalSatisfied || !autoMergeAllowed)) {
     await disableAutoMerge(github, currentPull.node_id);
@@ -504,6 +533,7 @@ module.exports = {
   isUnstableMergeStateError,
   managedCommentBody,
   mergeMethod,
+  policyMessage,
   requestMissingReviews,
   reviewTargets,
   run,
