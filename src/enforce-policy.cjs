@@ -397,6 +397,7 @@ async function run({ github, context, core, config, environment = process.env })
     evaluatedHeadSha: initialHeadSha
   });
   const approvalSatisfied = !result.approvalRequired || ownerApproved;
+  const policyValid = result.decision === 'would-enable-auto-merge';
   const location = {
     owner,
     repo,
@@ -407,14 +408,14 @@ async function run({ github, context, core, config, environment = process.env })
 
   await upsertPolicyCheck(github, location, checkRuns, {
     name: config.policyCheckName || DEFAULT_CHECK_NAME,
-    approved: approvalSatisfied,
-    title: approvalSatisfied ? 'Approval policy passed' : 'CODEOWNER approval required',
-    summary: `${classification.category}: ${classification.reason} Resolved owner: ${owners.join(', ')}.`
+    approved: policyValid,
+    title: policyValid ? 'Approval policy passed' : 'Manual review required',
+    summary: `${classification.category}: ${classification.reason} Resolved maintainer: ${owners.join(', ')}.`
   });
   if (result.approvalRequired && !ownerApproved) {
     await requestMissingReviews(github, location, currentPull, owners);
   }
-  else if (!result.approvalRequired) {
+  else if (policyValid && !result.approvalRequired) {
     await withdrawUnneededReviews(github, location, currentPull, owners);
   }
 
