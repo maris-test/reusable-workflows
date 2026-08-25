@@ -408,18 +408,24 @@ async function disableAutoMerge(github, pullRequestId) {
  * @returns {Promise<Object>} - The result of the policy enforcement, including classification, owners, checkState, approvalSatisfied, and decision.
  */
 async function run({ github, context, core, config, environment = process.env }) {
-  const pullNumber = context.payload.pull_request.number;
   const { owner, repo } = context.repo;
-  const initialHeadSha = context.payload.pull_request.head.sha;
-  const baseRef = context.payload.pull_request.base.ref;
-  const [files, commits, reviews, checks, comments, codeowners, pullResponse] = await Promise.all([
+  const eventPullRequest = context.payload.pull_request || context.payload.check_suite.pull_requests[0];
+  if (!eventPullRequest) {
+    core.notice('No pull request is associated with this policy event.');
+    return { decision: 'stop-without-pull-request' };
+  }
+
+  const pullNumber = eventPullRequest.number;
+  const initialHeadSha = eventPullRequest.head?.sha || context.payload.check_suite.head_sha;
+  const pullResponse = await github.rest.pulls.get({ owner, repo, pull_number: pullNumber });
+  const baseRef = pullResponse.data.base.ref;
+  const [files, commits, reviews, checks, comments, codeowners] = await Promise.all([
     github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pullNumber, per_page: 100 }),
     github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: pullNumber, per_page: 100 }),
     github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: pullNumber, per_page: 100 }),
     github.paginate(github.rest.checks.listForRef, { owner, repo, ref: initialHeadSha, per_page: 100 }),
     github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: pullNumber, per_page: 100 }),
-    readCodeowners(github, owner, repo, baseRef),
-    github.rest.pulls.get({ owner, repo, pull_number: pullNumber })
+    readCodeowners(github, owner, repo, baseRef)
   ]);
 
   const currentPull = pullResponse.data;
@@ -472,7 +478,11 @@ async function run({ github, context, core, config, environment = process.env })
   if (result.approvalRequired && !ownerApproved) {
     await requestMissingReviews(github, location, currentPull, owners);
   }
-  else if (result.decision === 'would-enable-auto-merge' && !result.approvalRequired) {
+  else if (
+    result.decision === 'would-enable-auto-merge' &&
+    !result.approvalRequired &&
+    checkState.passed
+  ) {
     await withdrawUnneededReviews(github, location, currentPull, owners);
   }
 
