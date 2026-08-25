@@ -314,34 +314,6 @@ async function requestMissingReviews(github, location, currentPull, owners) {
   });
 }
 
-/**
- * Withdraws review requests from resolved owners once a later run finds approval is no
- * longer required (for example, a force-push trims the diff down to translation-only files).
- * @param {Object} github - The GitHub API client.
- * @param {Object} location - The location of the pull request (owner, repo, pullNumber).
- * @param {Object} currentPull - The current pull request data.
- * @param {Array} owners - The list of CODEOWNER strings that may have a pending request.
- */
-async function withdrawUnneededReviews(github, location, currentPull, owners) {
-  const targets = reviewTargets(owners, location.owner);
-  const currentUsers = new Set((currentPull.requested_reviewers || []).map((user) => user.login));
-  const currentTeams = new Set((currentPull.requested_teams || []).map((team) => team.slug));
-  const reviewers = targets.users.filter((login) => currentUsers.has(login));
-  const teamReviewers = targets.teams.filter((slug) => currentTeams.has(slug));
-
-  if (reviewers.length === 0 && teamReviewers.length === 0) {
-    return;
-  }
-
-  await github.rest.pulls.removeRequestedReviewers({
-    owner: location.owner,
-    repo: location.repo,
-    pull_number: location.pullNumber,
-    reviewers,
-    team_reviewers: teamReviewers
-  });
-}
-
 function mergeMethod(value) {
   const normalized = String(value || 'merge').toUpperCase();
 
@@ -409,14 +381,14 @@ async function disableAutoMerge(github, pullRequestId) {
  */
 async function run({ github, context, core, config, environment = process.env }) {
   const { owner, repo } = context.repo;
-  const eventPullRequest = context.payload.pull_request || context.payload.check_suite.pull_requests[0];
+  const eventPullRequest = context.payload.pull_request;
   if (!eventPullRequest) {
     core.notice('No pull request is associated with this policy event.');
     return { decision: 'stop-without-pull-request' };
   }
 
   const pullNumber = eventPullRequest.number;
-  const initialHeadSha = eventPullRequest.head?.sha || context.payload.check_suite.head_sha;
+  const initialHeadSha = eventPullRequest.head.sha;
   const pullResponse = await github.rest.pulls.get({ owner, repo, pull_number: pullNumber });
   const baseRef = pullResponse.data.base.ref;
   const [files, commits, reviews, checks, comments, codeowners] = await Promise.all([
@@ -478,13 +450,6 @@ async function run({ github, context, core, config, environment = process.env })
   if (result.approvalRequired && !ownerApproved) {
     await requestMissingReviews(github, location, currentPull, owners);
   }
-  else if (
-    result.decision === 'would-enable-auto-merge' &&
-    !result.approvalRequired &&
-    checkState.passed
-  ) {
-    await withdrawUnneededReviews(github, location, currentPull, owners);
-  }
 
   let message;
 
@@ -543,6 +508,5 @@ module.exports = {
   reviewTargets,
   run,
   upsertManagedComment,
-  upsertPolicyCheck,
-  withdrawUnneededReviews
+  upsertPolicyCheck
 };
