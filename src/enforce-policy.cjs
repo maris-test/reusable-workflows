@@ -12,6 +12,7 @@ const DEFAULT_CHECK_NAME = 'H5P policy approval';
 
 async function readCodeowners(github, owner, repo, ref) {
   const path = '.github/CODEOWNERS';
+
   try {
     const response = await github.rest.repos.getContent({ owner, repo, path, ref });
     if (!Array.isArray(response.data) && response.data.content) {
@@ -23,6 +24,7 @@ async function readCodeowners(github, owner, repo, ref) {
       throw error;
     }
   }
+
   return '';
 }
 
@@ -30,6 +32,7 @@ function dependabotMetadata(environment, outcome) {
   if (outcome !== 'success') {
     return { valid: false };
   }
+
   return {
     valid: true,
     updateType: environment.DEPENDABOT_UPDATE_TYPE,
@@ -67,13 +70,17 @@ function commitsAreTrusted(commits) {
  */
 function latestReviewStates(reviews, headSha) {
   const states = new Map();
+
   for (const review of reviews) {
     const login = review.user && review.user.login;
+  
     if (!login || (review.commit_id && review.commit_id !== headSha)) {
       continue;
     }
+  
     states.set(login, String(review.state || '').toUpperCase());
   }
+
   return states;
 }
 
@@ -85,9 +92,11 @@ function latestReviewStates(reviews, headSha) {
 function splitOwner(owner) {
   const value = String(owner).replace(/^@/, '');
   const separator = value.indexOf('/');
+
   if (separator === -1) {
     return { type: 'user', login: value };
   }
+
   return {
     type: 'team',
     organization: value.slice(0, separator),
@@ -104,6 +113,7 @@ function splitOwner(owner) {
 function reviewTargets(owners, repositoryOwner) {
   const users = new Set();
   const teams = new Set();
+
   for (const owner of owners) {
     const target = splitOwner(owner);
     if (target.type === 'user') {
@@ -113,6 +123,7 @@ function reviewTargets(owners, repositoryOwner) {
       teams.add(target.slug);
     }
   }
+
   return { users: [...users], teams: [...teams] };
 }
 
@@ -134,6 +145,7 @@ async function hasApplicableOwnerApproval(github, reviews, owners, headSha) {
     if (target.type === 'user' && approvedUsers.includes(target.login)) {
       return true;
     }
+
     if (target.type === 'team') {
       for (const login of approvedUsers) {
         try {
@@ -142,6 +154,7 @@ async function hasApplicableOwnerApproval(github, reviews, owners, headSha) {
             team_slug: target.slug,
             username: login
           });
+
           if (response.data.state === 'active') {
             return true;
           }
@@ -154,6 +167,7 @@ async function hasApplicableOwnerApproval(github, reviews, owners, headSha) {
       }
     }
   }
+
   return false;
 }
 
@@ -164,6 +178,7 @@ ${message}`;
 
 async function upsertManagedComment(github, location, comments, body) {
   const existing = comments.find((comment) => String(comment.body || '').includes(COMMENT_MARKER));
+
   if (existing) {
     if (existing.body !== body) {
       await github.rest.issues.updateComment({
@@ -175,12 +190,14 @@ async function upsertManagedComment(github, location, comments, body) {
     }
     return existing.id;
   }
+
   const response = await github.rest.issues.createComment({
     owner: location.owner,
     repo: location.repo,
     issue_number: location.pullNumber,
     body
   });
+
   return response.data.id;
 }
 
@@ -195,18 +212,16 @@ function latestPolicyCheck(checkRuns, name) {
  * @param {Object} github - The GitHub API client.
  * @param {Object} location - The location of the pull request (owner, repo, pullNumber, pullUrl, headSha).
  * @param {Array} checkRuns - The list of existing check runs for the pull request.
- * @param {Object} input - The input data for the policy check (name, approved, title, summary).
+ * @param {Object} input - The input data for the policy check (name, conclusion, title, summary).
  * @returns {Promise<number>} - The ID of the upserted check run.
  */
 async function upsertPolicyCheck(github, location, checkRuns, input) {
   const existing = latestPolicyCheck(checkRuns, input.name);
-  const conclusion = input.conclusion || (input.approved ? 'success' : null);
-  const desiredStatus = conclusion ? 'completed' : 'in_progress';
-  const desiredConclusion = conclusion;
+  const desiredStatus = input.conclusion === null ? 'in_progress' : 'completed';
   if (
     existing &&
     existing.status === desiredStatus &&
-    (desiredConclusion === null || existing.conclusion === desiredConclusion)
+    (input.conclusion === null || existing.conclusion === input.conclusion)
   ) {
     return existing.id;
   }
@@ -219,22 +234,57 @@ async function upsertPolicyCheck(github, location, checkRuns, input) {
     external_id: `h5p-policy-pr-${location.pullNumber}`,
     output: { title: input.title, summary: input.summary }
   };
-  if (conclusion) {
-    request.status = 'completed';
-    request.conclusion = conclusion;
-    request.completed_at = new Date().toISOString();
-  }
-  else {
+
+  if (input.conclusion === null) {
     request.status = 'in_progress';
     request.started_at = new Date().toISOString();
+  }
+  else {
+    request.status = 'completed';
+    request.conclusion = input.conclusion;
+    request.completed_at = new Date().toISOString();
   }
 
   if (existing && existing.status !== 'completed') {
     await github.rest.checks.update({ ...request, check_run_id: existing.id });
     return existing.id;
   }
+
   const response = await github.rest.checks.create({ ...request, head_sha: location.headSha });
   return response.data.id;
+}
+
+function policyCheckConclusion(result, ownerApproved) {
+  if (result.decision === 'would-enable-auto-merge') {
+    return 'success';
+  }
+
+  if (result.approvalRequired && !ownerApproved) {
+    return null;
+  }
+  return 'failure';
+}
+
+function policyCheckOutput(result, classification, owners, removedFiles) {
+  const ownerSummary = `Resolved maintainer: ${owners.join(', ')}.`;
+  if (result.decision === 'would-enable-auto-merge') {
+    return {
+      title: 'Approval policy passed',
+      summary: `${classification.category}: ${classification.reason} ${ownerSummary}`
+    };
+  }
+
+  if (removedFiles) {
+    return {
+      title: 'File removal requires manual review',
+      summary: `This pull request removes one or more files and requires manual review. ${classification.category}: ${classification.reason} ${ownerSummary}`
+    };
+  }
+
+  return {
+    title: 'Manual review required',
+    summary: `${classification.category}: ${classification.reason} ${ownerSummary}`
+  };
 }
 
 /**
@@ -250,9 +300,11 @@ async function requestMissingReviews(github, location, currentPull, owners) {
   const currentTeams = new Set((currentPull.requested_teams || []).map((team) => team.slug));
   const reviewers = targets.users.filter((login) => !currentUsers.has(login));
   const teamReviewers = targets.teams.filter((slug) => !currentTeams.has(slug));
+
   if (reviewers.length === 0 && teamReviewers.length === 0) {
     return;
   }
+
   await github.rest.pulls.requestReviewers({
     owner: location.owner,
     repo: location.repo,
@@ -276,9 +328,11 @@ async function withdrawUnneededReviews(github, location, currentPull, owners) {
   const currentTeams = new Set((currentPull.requested_teams || []).map((team) => team.slug));
   const reviewers = targets.users.filter((login) => currentUsers.has(login));
   const teamReviewers = targets.teams.filter((slug) => currentTeams.has(slug));
+
   if (reviewers.length === 0 && teamReviewers.length === 0) {
     return;
   }
+
   await github.rest.pulls.removeRequestedReviewers({
     owner: location.owner,
     repo: location.repo,
@@ -290,9 +344,11 @@ async function withdrawUnneededReviews(github, location, currentPull, owners) {
 
 function mergeMethod(value) {
   const normalized = String(value || 'merge').toUpperCase();
+
   if (!['MERGE', 'SQUASH', 'REBASE'].includes(normalized)) {
     throw new Error(`Unsupported merge method: ${value}`);
   }
+
   return normalized;
 }
 
@@ -398,7 +454,7 @@ async function run({ github, context, core, config, environment = process.env })
     evaluatedHeadSha: initialHeadSha
   });
   const approvalSatisfied = !result.approvalRequired || ownerApproved;
-  const policyValid = result.decision === 'would-enable-auto-merge';
+  const policyCheck = policyCheckOutput(result, classification, owners, removedFiles);
   const location = {
     owner,
     repo,
@@ -409,20 +465,19 @@ async function run({ github, context, core, config, environment = process.env })
 
   await upsertPolicyCheck(github, location, checkRuns, {
     name: config.policyCheckName || DEFAULT_CHECK_NAME,
-    conclusion: policyValid
-      ? 'success'
-      : (result.approvalRequired && !ownerApproved ? null : 'failure'),
-    title: policyValid ? 'Approval policy passed' : 'Manual review required',
-    summary: `${classification.category}: ${classification.reason} Resolved maintainer: ${owners.join(', ')}.`
+    conclusion: policyCheckConclusion(result, ownerApproved),
+    ...policyCheck
   });
+
   if (result.approvalRequired && !ownerApproved) {
     await requestMissingReviews(github, location, currentPull, owners);
   }
-  else if (policyValid && !result.approvalRequired) {
+  else if (result.decision === 'would-enable-auto-merge' && !result.approvalRequired) {
     await withdrawUnneededReviews(github, location, currentPull, owners);
   }
 
   let message;
+
   if (!approvalSatisfied) {
     message = `${owners.join(', ')} approval requested.`;
   }
@@ -435,6 +490,7 @@ async function run({ github, context, core, config, environment = process.env })
   else {
     message = `Pull request is eligible for auto merge if all required validation checks pass.`;
   }
+
   await upsertManagedComment(github, location, comments, managedCommentBody(message));
 
   if (currentPull.auto_merge && (!approvalSatisfied || !autoMergeAllowed)) {
@@ -456,6 +512,7 @@ async function run({ github, context, core, config, environment = process.env })
       ['Head SHA', initialHeadSha]
     ])
     .write();
+  
   core.setOutput('category', classification.category);
   core.setOutput('decision', result.decision);
   core.setOutput('owners', JSON.stringify(owners));

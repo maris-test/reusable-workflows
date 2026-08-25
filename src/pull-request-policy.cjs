@@ -47,6 +47,7 @@ function globToRegex(pattern, options = {}) {
 
   const basenamePattern = !source.includes('/');
   const prefix = options.codeowners && basenamePattern && !anchored ? '(?:^|.*/)' : '^';
+
   return new RegExp(`${prefix}${expression}$`);
 }
 
@@ -60,6 +61,7 @@ function parseStableVersion(version) {
   if (!match) {
     return null;
   }
+
   return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) };
 }
 
