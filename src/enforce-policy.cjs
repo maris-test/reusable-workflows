@@ -42,6 +42,10 @@ function dependabotMetadata(environment, outcome) {
   };
 }
 
+function hasRemovedFiles(files) {
+  return files.some((file) => String(file.status || '').toLowerCase() === 'removed');
+}
+
 /**
  * Returns true if all commits are authored by dependabot[bot] and verified.
  * @param {Array} commits - The list of commits to evaluate.
@@ -257,6 +261,32 @@ async function requestMissingReviews(github, location, currentPull, owners) {
   });
 }
 
+/**
+ * Withdraws review requests from resolved owners once a later run finds approval is no
+ * longer required (for example, a force-push trims the diff down to translation-only files).
+ * @param {Object} github - The GitHub API client.
+ * @param {Object} location - The location of the pull request (owner, repo, pullNumber).
+ * @param {Object} currentPull - The current pull request data.
+ * @param {Array} owners - The list of CODEOWNER strings that may have a pending request.
+ */
+async function withdrawUnneededReviews(github, location, currentPull, owners) {
+  const targets = reviewTargets(owners, location.owner);
+  const currentUsers = new Set((currentPull.requested_reviewers || []).map((user) => user.login));
+  const currentTeams = new Set((currentPull.requested_teams || []).map((team) => team.slug));
+  const reviewers = targets.users.filter((login) => currentUsers.has(login));
+  const teamReviewers = targets.teams.filter((slug) => currentTeams.has(slug));
+  if (reviewers.length === 0 && teamReviewers.length === 0) {
+    return;
+  }
+  await github.rest.pulls.removeRequestedReviewers({
+    owner: location.owner,
+    repo: location.repo,
+    pull_number: location.pullNumber,
+    reviewers,
+    team_reviewers: teamReviewers
+  });
+}
+
 function mergeMethod(value) {
   const normalized = String(value || 'merge').toUpperCase();
   if (!['MERGE', 'SQUASH', 'REBASE'].includes(normalized)) {
@@ -342,6 +372,7 @@ async function run({ github, context, core, config, environment = process.env })
   }
 
   const changedFiles = files.map((file) => file.filename);
+  const removedFiles = hasRemovedFiles(files);
   const metadata = dependabotMetadata(environment, config.dependabotMetadataOutcome);
   const trustedCommits = commitsAreTrusted(commits);
   const classification = classifyPullRequest({
@@ -355,7 +386,7 @@ async function run({ github, context, core, config, environment = process.env })
   const ownerApproved = await hasApplicableOwnerApproval(github, reviews, owners, initialHeadSha);
   const checkRuns = checks.flatMap((page) => page.check_runs || page);
   const checkState = requiredCheckState(config.requiredChecks, checkRuns);
-  const autoMergeAllowed = currentPull.user.login !== 'dependabot[bot]' || (metadata.valid && trustedCommits);
+  const autoMergeAllowed = !removedFiles && (currentPull.user.login !== 'dependabot[bot]' || (metadata.valid && trustedCommits));
   const result = evaluatePolicy({
     category: classification.category,
     autoMergeAllowed,
@@ -383,16 +414,22 @@ async function run({ github, context, core, config, environment = process.env })
   if (result.approvalRequired && !ownerApproved) {
     await requestMissingReviews(github, location, currentPull, owners);
   }
+  else if (!result.approvalRequired) {
+    await withdrawUnneededReviews(github, location, currentPull, owners);
+  }
 
   let message;
   if (!approvalSatisfied) {
     message = `${owners.join(', ')} approval requested.`;
   }
+  else if (removedFiles) {
+    message = 'H5P Automation will keep this pull request open because it removes files.';
+  }
   else if (!autoMergeAllowed) {
-    message = `Automation will keep this pull request open because Dependabot no longer owns every verified commit.`;
+    message = `H5P Automation will keep this pull request open because Dependabot no longer owns every verified commit.`;
   }
   else {
-    message = `The approval policy passed. Platform auto-merge can wait for the required validation checks.`;
+    message = `Pull request is eligible for auto merge if all required validation checks pass.`;
   }
   await upsertManagedComment(github, location, comments, managedCommentBody(message));
 
@@ -426,6 +463,7 @@ module.exports = {
   DEFAULT_CHECK_NAME,
   commitsAreTrusted,
   dependabotMetadata,
+  hasRemovedFiles,
   hasApplicableOwnerApproval,
   isUnstableMergeStateError,
   managedCommentBody,
@@ -434,5 +472,6 @@ module.exports = {
   reviewTargets,
   run,
   upsertManagedComment,
-  upsertPolicyCheck
+  upsertPolicyCheck,
+  withdrawUnneededReviews
 };
