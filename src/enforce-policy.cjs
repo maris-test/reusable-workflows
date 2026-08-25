@@ -200,8 +200,9 @@ function latestPolicyCheck(checkRuns, name) {
  */
 async function upsertPolicyCheck(github, location, checkRuns, input) {
   const existing = latestPolicyCheck(checkRuns, input.name);
-  const desiredStatus = input.approved ? 'completed' : 'in_progress';
-  const desiredConclusion = input.approved ? 'success' : null;
+  const conclusion = input.conclusion || (input.approved ? 'success' : null);
+  const desiredStatus = conclusion ? 'completed' : 'in_progress';
+  const desiredConclusion = conclusion;
   if (
     existing &&
     existing.status === desiredStatus &&
@@ -218,9 +219,9 @@ async function upsertPolicyCheck(github, location, checkRuns, input) {
     external_id: `h5p-policy-pr-${location.pullNumber}`,
     output: { title: input.title, summary: input.summary }
   };
-  if (input.approved) {
+  if (conclusion) {
     request.status = 'completed';
-    request.conclusion = 'success';
+    request.conclusion = conclusion;
     request.completed_at = new Date().toISOString();
   }
   else {
@@ -408,7 +409,9 @@ async function run({ github, context, core, config, environment = process.env })
 
   await upsertPolicyCheck(github, location, checkRuns, {
     name: config.policyCheckName || DEFAULT_CHECK_NAME,
-    approved: policyValid,
+    conclusion: policyValid
+      ? 'success'
+      : (result.approvalRequired && !ownerApproved ? null : 'failure'),
     title: policyValid ? 'Approval policy passed' : 'Manual review required',
     summary: `${classification.category}: ${classification.reason} Resolved maintainer: ${owners.join(', ')}.`
   });
