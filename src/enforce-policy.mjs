@@ -1,18 +1,26 @@
-'use strict';
-
-const {
+import {
   CATEGORY,
   classifyPullRequest,
   evaluatePolicy,
   requiredCheckState,
   resolveOwners
-} = require('./pull-request-policy.cjs');
+} from './pull-request-policy.mjs';
 
 const COMMENT_MARKER = '<!-- h5p-managed-policy -->';
 const DEFAULT_CHECK_NAME = 'H5P policy approval';
+const DEFAULT_CHECK_POLL_INTERVAL_MS = 15_000;
+const DEFAULT_CHECK_TIMEOUT_MS = 30 * 60_000;
 
+/**
+ * Reads the policy ownership map from the trusted base ref.
+ * @param {Object} github GitHub client supplied by actions/github-script.
+ * @param {string} owner Repository owner.
+ * @param {string} repo Repository name.
+ * @param {string} ref Trusted base branch or commit.
+ * @returns {Promise<string>} Decoded CODEOWNERS text, or an empty string when absent.
+ */
 async function readCodeowners(github, owner, repo, ref) {
-  const path = '.github/CODEOWNERS';
+  const path = 'CODEOWNERS';
 
   try {
     const response = await github.rest.repos.getContent({ owner, repo, path, ref });
@@ -208,6 +216,51 @@ function latestPolicyCheck(checkRuns, name) {
     .sort((left, right) => new Date(right.started_at || 0) - new Date(left.started_at || 0))[0];
 }
 
+async function listCheckRuns(github, location) {
+  const checks = await github.paginate(github.rest.checks.listForRef, {
+    owner: location.owner,
+    repo: location.repo,
+    ref: location.headSha,
+    per_page: 100
+  });
+
+  return checks.flatMap((page) => page.check_runs || page);
+}
+
+/**
+ * Polls until every configured check completes or the timeout expires.
+ * @param {Object} github GitHub client supplied by actions/github-script.
+ * @param {Object} core GitHub Actions core module.
+ * @param {{owner: string, repo: string, headSha: string}} location
+ * @param {string[]} requiredChecks Exact GitHub check-run names.
+ * @param {Object} [options]
+ * @param {Array<Object>} [options.checkRuns] Check runs already fetched for the head SHA.
+ * @param {number} [options.timeoutMs]
+ * @param {number} [options.pollIntervalMs]
+ * @param {(duration: number) => Promise<void>} [options.sleep]
+ * @returns {Promise<{checkRuns: Array<Object>, checkState: {failed: string[], pending: string[], passed: boolean}}>}
+ */
+async function waitForRequiredChecks(github, core, location, requiredChecks, options = {}) {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_CHECK_POLL_INTERVAL_MS;
+  const sleep = options.sleep ?? ((duration) => new Promise((resolve) => setTimeout(resolve, duration)));
+  const deadline = Date.now() + timeoutMs;
+  let checkRuns = options.checkRuns || [];
+  let checkState = requiredCheckState(requiredChecks, checkRuns);
+
+  if (checkState.pending.length > 0) {
+    core.notice(`Waiting for required checks: ${checkState.pending.join(', ')}`);
+  }
+
+  while (checkState.pending.length > 0 && Date.now() < deadline) {
+    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    checkRuns = await listCheckRuns(github, location);
+    checkState = requiredCheckState(requiredChecks, checkRuns);
+  }
+
+  return { checkRuns, checkState };
+}
+
 /**
  * Upserts a policy check run for the given pull request.
  * @param {Object} github - The GitHub API client.
@@ -256,6 +309,10 @@ async function upsertPolicyCheck(github, location, checkRuns, input) {
 }
 
 function policyCheckConclusion(result, ownerApproved, removedFiles) {
+  if (result.decision === 'wait-for-required-checks') {
+    return null;
+  }
+
   if (
     !removedFiles &&
     (
@@ -274,6 +331,13 @@ function policyCheckConclusion(result, ownerApproved, removedFiles) {
 
 function policyCheckOutput(result, classification, owners, removedFiles) {
   const ownerSummary = `Resolved maintainer: ${owners.join(', ')}.`;
+  if (result.decision === 'wait-for-required-checks') {
+    return {
+      title: 'Waiting for required checks',
+      summary: `${classification.category}: validation has not completed. ${ownerSummary}`
+    };
+  }
+
   if (result.decision === 'would-enable-auto-merge') {
     return {
       title: 'Approval policy passed',
@@ -303,6 +367,8 @@ function policyCheckOutput(result, classification, owners, removedFiles) {
 
 function policyMessage(result, owners, removedFiles) {
   switch (result.decision) {
+    case 'wait-for-required-checks':
+      return 'H5P Automation is waiting for all configured validation checks to finish.';
     case 'request-owner-review':
       return `${owners.join(', ')} approval requested.`;
     case 'keep-open-and-notify-owner':
@@ -454,8 +520,24 @@ async function run({ github, context, core, config, environment = process.env })
   });
   const owners = resolveOwners(changedFiles, codeowners, config.fallbackOwner);
   const ownerApproved = await hasApplicableOwnerApproval(github, reviews, owners, initialHeadSha);
-  const checkRuns = checks.flatMap((page) => page.check_runs || page);
-  const checkState = requiredCheckState(config.requiredChecks, checkRuns);
+  let checkRuns = checks.flatMap((page) => page.check_runs || page);
+  const waitedChecks = await waitForRequiredChecks(
+    github,
+    core,
+    { owner, repo, headSha: initialHeadSha },
+    config.requiredChecks,
+    {
+      checkRuns,
+      timeoutMs: config.requiredChecksTimeoutMs
+    }
+  );
+  checkRuns = waitedChecks.checkRuns;
+  const checkState = waitedChecks.checkState;
+  const refreshedPull = await github.rest.pulls.get({ owner, repo, pull_number: pullNumber });
+  if (refreshedPull.data.head.sha !== initialHeadSha) {
+    core.notice('The pull request head changed while waiting for required checks.');
+    return { decision: 'stop-for-changed-head' };
+  }
   const autoMergeCategory = [CATEGORY.DEPENDENCY_PATCH, CATEGORY.TRANSLATION]
     .includes(classification.category);
   const autoMergeAllowed = !removedFiles && autoMergeCategory && (
@@ -500,7 +582,12 @@ async function run({ github, context, core, config, environment = process.env })
   if (currentPull.auto_merge && (!approvalSatisfied || !autoMergeAllowed)) {
     await disableAutoMerge(github, currentPull.node_id);
   }
-  else if (!currentPull.auto_merge && approvalSatisfied && autoMergeAllowed) {
+  else if (
+    !currentPull.auto_merge &&
+    approvalSatisfied &&
+    autoMergeAllowed &&
+    result.decision === 'would-enable-auto-merge'
+  ) {
     await enableAutoMerge(github, core, currentPull.node_id, config.mergeMethod);
   }
 
@@ -523,7 +610,7 @@ async function run({ github, context, core, config, environment = process.env })
   return { classification, owners, checkState, approvalSatisfied, ...result };
 }
 
-module.exports = {
+export {
   COMMENT_MARKER,
   DEFAULT_CHECK_NAME,
   commitsAreTrusted,
@@ -535,8 +622,10 @@ module.exports = {
   mergeMethod,
   policyMessage,
   requestMissingReviews,
+  readCodeowners,
   reviewTargets,
   run,
+  waitForRequiredChecks,
   upsertManagedComment,
   upsertPolicyCheck
 };

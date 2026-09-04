@@ -89,7 +89,7 @@ jobs:
         with:
           script: |
             const path = require('path');
-            const policy = require(path.join(process.env.GITHUB_WORKSPACE, '.h5p-policy', 'src', 'enforce-policy.cjs'));
+            const policy = await import(`${process.env.GITHUB_WORKSPACE}/.h5p-policy/src/enforce-policy.mjs`);
             await policy.run({
               github,
               context,

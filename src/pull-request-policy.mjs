@@ -1,11 +1,42 @@
-'use strict';
-
 const CATEGORY = Object.freeze({
   DEPENDENCY_PATCH: 'dependency-patch',
   DEPENDENCY_REVIEW: 'dependency-review',
   TRANSLATION: 'translation',
   MANUAL: 'manual'
 });
+
+/**
+ * @typedef {Object} DependabotMetadata
+ * @property {boolean} valid
+ * @property {string} [updateType]
+ * @property {string} [previousVersion]
+ * @property {string} [newVersion]
+ * @property {string[]} [dependencies]
+ */
+
+/**
+ * @typedef {Object} ClassificationInput
+ * @property {string} author
+ * @property {string[]} changedFiles
+ * @property {string[]} translationPatterns
+ * @property {boolean} dependabotCommitsTrusted
+ * @property {DependabotMetadata} dependabotMetadata
+ */
+
+/**
+ * @typedef {Object} CheckRun
+ * @property {string} name
+ * @property {string} status
+ * @property {string|null} conclusion
+ * @property {string} [started_at]
+ */
+
+/**
+ * @typedef {Object} CheckState
+ * @property {string[]} failed
+ * @property {string[]} pending
+ * @property {boolean} passed
+ */
 
 function normalizePath(path) {
   return String(path).replace(/\\/g, '/').replace(/^\.\//, '');
@@ -89,13 +120,8 @@ function validDependabotMetadata(metadata) {
  * - DEPENDENCY_PATCH: Dependabot supplied a verified stable patch at or above 1.0.0.
  * - DEPENDENCY_REVIEW: The dependency update is not an eligible stable patch.
  * - TRANSLATION: Only configured translation files changed.
- * @param {Object} input - The pull request data.
- * @param {string} input.author - The author of the pull request.
- * @param {string[]} input.changedFiles - The list of changed file paths.
- * @param {string[]} input.translationPatterns - The list of translation file patterns.
- * @param {boolean} input.dependabotCommitsTrusted - Whether all Dependabot commits are trusted.
- * @param {Object} input.dependabotMetadata - The Dependabot metadata object.
- * @returns {Object} An object containing the category and reason for classification.
+ * @param {ClassificationInput} input
+ * @returns {{category: string, reason: string}}
  */
 function classifyPullRequest(input) {
   const changedFiles = input.changedFiles || [];
@@ -152,6 +178,14 @@ function parseCodeowners(content) {
   return rules;
 }
 
+/**
+ * Resolves all owners applicable to the changed paths. For each path, the last matching
+ * CODEOWNERS rule wins. The fallback owner is used for paths without a match.
+ * @param {string[]} changedFiles
+ * @param {string} codeownersContent
+ * @param {string} fallbackOwner
+ * @returns {string[]} Unique owners, including the leading `@`.
+ */
 function resolveOwners(changedFiles, codeownersContent, fallbackOwner) {
   const fallback = String(fallbackOwner).startsWith('@') ? String(fallbackOwner) : `@${fallbackOwner}`;
   const rules = parseCodeowners(codeownersContent);
@@ -170,6 +204,11 @@ function resolveOwners(changedFiles, codeownersContent, fallbackOwner) {
   return [...owners];
 }
 
+/**
+ * @param {string[]} requiredChecks Exact GitHub check-run names.
+ * @param {CheckRun[]} checkRuns
+ * @returns {CheckState}
+ */
 function requiredCheckState(requiredChecks, checkRuns) {
   const latestByName = new Map();
   for (const run of checkRuns) {
@@ -193,6 +232,17 @@ function requiredCheckState(requiredChecks, checkRuns) {
   return { failed, pending, passed: failed.length === 0 && pending.length === 0 };
 }
 
+/**
+ * @param {Object} input
+ * @param {string} input.category
+ * @param {boolean} input.autoMergeAllowed
+ * @param {CheckState} input.checkState
+ * @param {boolean} input.ownerApproved
+ * @param {boolean|null} input.mergeable
+ * @param {string} input.headSha
+ * @param {string} input.evaluatedHeadSha
+ * @returns {{approvalRequired: boolean, decision: string}}
+ */
 function evaluatePolicy(input) {
   const approvalRequired = ![
     CATEGORY.DEPENDENCY_PATCH,
@@ -200,6 +250,9 @@ function evaluatePolicy(input) {
   ].includes(input.category);
   if (input.headSha !== input.evaluatedHeadSha) {
     return { approvalRequired, decision: 'stop-for-changed-head' };
+  }
+  if (input.checkState.pending.length > 0) {
+    return { approvalRequired, decision: 'wait-for-required-checks' };
   }
   if (input.checkState.failed.length > 0 || input.mergeable === false) {
     return { approvalRequired, decision: 'keep-open-and-notify-owner' };
@@ -213,7 +266,7 @@ function evaluatePolicy(input) {
   return { approvalRequired, decision: 'would-enable-auto-merge' };
 }
 
-module.exports = {
+export {
   CATEGORY,
   classifyPullRequest,
   evaluatePolicy,
