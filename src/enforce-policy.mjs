@@ -378,6 +378,30 @@ async function requestMissingReviews(github, location, currentPull, owners) {
   });
 }
 
+async function removeOptionalOwnerReviews(github, location, currentPull, owners) {
+  const targets = reviewTargets(owners, location.owner);
+  const ownerUsers = new Set(targets.users);
+  const ownerTeams = new Set(targets.teams);
+  const reviewers = (currentPull.requested_reviewers || [])
+    .map((user) => user.login)
+    .filter((login) => ownerUsers.has(login));
+  const teamReviewers = (currentPull.requested_teams || [])
+    .map((team) => team.slug)
+    .filter((slug) => ownerTeams.has(slug));
+
+  if (reviewers.length === 0 && teamReviewers.length === 0) {
+    return;
+  }
+
+  await github.rest.pulls.removeRequestedReviewers({
+    owner: location.owner,
+    repo: location.repo,
+    pull_number: location.pullNumber,
+    reviewers,
+    team_reviewers: teamReviewers
+  });
+}
+
 function mergeMethod(value) {
   const normalized = String(value || 'merge').toUpperCase();
 
@@ -529,6 +553,9 @@ async function run({ github, context, core, config, environment = process.env })
   if (result.approvalRequired && !ownerApproved) {
     await requestMissingReviews(github, location, currentPull, owners);
   }
+  else if (!result.approvalRequired) {
+    await removeOptionalOwnerReviews(github, location, currentPull, owners);
+  }
 
   const approvalSatisfied = !result.approvalRequired || ownerApproved;
   await upsertManagedComment(
@@ -584,6 +611,7 @@ export {
   policyFeedback,
   policyState,
   readPolicyState,
+  removeOptionalOwnerReviews,
   requestMissingReviews,
   readCodeowners,
   reviewTargets,
