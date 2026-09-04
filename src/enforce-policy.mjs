@@ -542,14 +542,6 @@ async function run({ github, context, core, config, environment = process.env })
     headSha: initialHeadSha
   };
 
-  await upsertPolicyCheck(github, location, checkRuns, {
-    name: checkName,
-    externalId: policyState(classification, pullNumber, initialHeadSha),
-    conclusion: feedback.conclusion,
-    title: feedback.title,
-    summary: feedback.summary
-  });
-
   if (result.approvalRequired && !ownerApproved) {
     await requestMissingReviews(github, location, currentPull, owners);
   }
@@ -577,6 +569,14 @@ async function run({ github, context, core, config, environment = process.env })
   else if (!currentPull.auto_merge && autoMergeEligible) {
     await enableAutoMerge(github, currentPull.node_id, config.mergeMethod);
   }
+
+  await upsertPolicyCheck(github, location, checkRuns, {
+    name: checkName,
+    externalId: policyState(classification, pullNumber, initialHeadSha),
+    conclusion: feedback.conclusion,
+    title: feedback.title,
+    summary: feedback.summary
+  });
 
   await core.summary
     .addHeading('H5P pull request policy enforcement')
